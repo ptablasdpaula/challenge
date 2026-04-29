@@ -1,31 +1,21 @@
 """
-train.py
---------
-Training entrypoint for Task B DeepSets CNF.
+train.py  —  Task B modal CNF training entrypoint
 
-Quick sanity check (overfit 10 samples):
-  python train.py --data_folder ../random-IR-10000-4.0s --overfit --n_samples 10
+Local (MPS, DeepSets backend):
+  python train.py --data_folder ../random-IR-10000-4.0s \
+                  --model deepsets --overfit --n_samples 2 \
+                  --max_epochs 5000
 
-Full training:
-  python train.py --data_folder ../random-IR-10000-4.0s
-
-Key args:
-  --data_folder   : path to the dataset directory
-  --overfit       : overfit on --n_samples samples (sanity check)
-  --n_samples     : number of samples to use when --overfit is set (default 10)
-  --max_modes     : pad/truncate all samples to this fixed number of modes.
-                    Set to 0 to use dynamic padding (variable length per batch).
-  --batch_size    : (default 4; reduce if OOM)
-  --n_fft         : FFT size for encoder input (default 8192)
-  --d_model       : DeepSets hidden dim (default 128)
-  --n_layers      : number of DeepSets blocks (default 6)
-  --max_epochs    : (default 500)
-  --devices       : number of GPUs (default 1)
+Apocrita (CUDA, Mamba backend):
+  python train.py --data_folder /data/random-IR-10000-4.0s \
+                  --model mamba --batch_size 4 \
+                  --d_model 512 --d_ff 1024 --n_layers 12 --d_cond 256 \
+                  --d_state 32 --max_epochs 500 --wandb
 """
 
+import multiprocessing
 import argparse
 import os
-from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -36,26 +26,43 @@ from lightning.pytorch.loggers import WandbLogger
 from dataset import ModalPlateDataset, variable_length_collate
 from train_module import ModalFlowMatchingModule
 
+# Unlock A100 Tensor Cores
+torch.set_float32_matmul_precision('medium')
 
 def parse_args():
     p = argparse.ArgumentParser()
-    p.add_argument('--data_folder', type=str, required=True)
-    p.add_argument('--overfit',     action='store_true')
-    p.add_argument('--n_samples',   type=int, default=10)
-    p.add_argument('--max_modes',   type=int, default=0,
-                   help='0 = dynamic padding per batch (recommended)')
-    p.add_argument('--batch_size',  type=int, default=4)
-    p.add_argument('--n_fft',       type=int, default=8192)
-    p.add_argument('--d_model',     type=int, default=128)
-    p.add_argument('--d_ff',        type=int, default=256)
-    p.add_argument('--n_layers',    type=int, default=6)
-    p.add_argument('--d_cond',      type=int, default=128)
-    p.add_argument('--lr',          type=float, default=1e-4)
-    p.add_argument('--max_epochs',  type=int, default=500)
-    p.add_argument('--devices',     type=int, default=1)
-    p.add_argument('--wandb',       action='store_true')
-    p.add_argument('--run_name',    type=str, default='deepsets-taskb')
-    p.add_argument('--compile',     action='store_true')
+    # data
+    p.add_argument('--data_folder',  type=str,   required=True)
+    p.add_argument('--n_fft',        type=int,   default=8192)
+    p.add_argument('--max_modes',    type=int,   default=0,
+                   help='0 = dynamic padding per batch')
+    # model
+    p.add_argument('--model',        type=str,   default='deepsets',
+                   choices=['deepsets', 'mamba'])
+    p.add_argument('--d_model',      type=int,   default=128)
+    p.add_argument('--d_ff',         type=int,   default=256)
+    p.add_argument('--n_layers',     type=int,   default=6)
+    p.add_argument('--d_cond',       type=int,   default=128)
+    p.add_argument('--d_state',      type=int,   default=16,
+                   help='Mamba SSM state size')
+    p.add_argument('--d_conv',       type=int,   default=4)
+    p.add_argument('--expand',       type=int,   default=2)
+    # training
+    p.add_argument('--batch_size',   type=int,   default=4)
+    p.add_argument('--lr',           type=float, default=1e-4)
+    p.add_argument('--max_epochs',   type=int,   default=500)
+    p.add_argument('--warmup_steps', type=int,   default=2000)
+    p.add_argument('--devices',      type=int,   default=1)
+    p.add_argument('--num_workers',  type=int,   default=4)
+    p.add_argument('--compile',      action='store_true')
+    # overfit
+    p.add_argument('--overfit',      action='store_true')
+    p.add_argument('--n_samples',    type=int,   default=10)
+    # logging
+    p.add_argument('--wandb',        action='store_true')
+    p.add_argument('--run_name',     type=str,   default='modal-cnf')
+    p.add_argument('--val_every',    type=int,   default=1,
+                   help='validate every N epochs (use 500 for overfit runs)')
     return p.parse_args()
 
 
@@ -65,72 +72,88 @@ def make_datasets(args):
         n_fft=args.n_fft,
         max_modes=args.max_modes if args.max_modes > 0 else None,
     )
-
     if args.overfit:
-        # Use a tiny subset for the overfit sanity check
         ds = ModalPlateDataset(**kwargs, split='train')
-        subset = Subset(ds, list(range(min(args.n_samples, len(ds)))))
-        return subset, subset    # train == val for overfit check
-    else:
-        train_ds = ModalPlateDataset(**kwargs, split='train')
-        val_ds   = ModalPlateDataset(**kwargs, split='val')
-        return train_ds, val_ds
+        sub = Subset(ds, list(range(min(args.n_samples, len(ds)))))
+        return sub, sub
+    return (
+        ModalPlateDataset(**kwargs, split='train'),
+        ModalPlateDataset(**kwargs, split='val'),
+    )
 
 
 def main():
     args = parse_args()
 
-    train_ds, val_ds = make_datasets(args)
+    # MPS doesn't support pin_memory
+    is_mps = (torch.backends.mps.is_available()
+               and args.model == 'deepsets')
+    pin = not is_mps
 
-    use_variable = (args.max_modes == 0)
-    collate_fn   = variable_length_collate if use_variable else None
+    train_ds, val_ds = make_datasets(args)
+    collate = (variable_length_collate
+               if args.max_modes == 0 else None)
 
     train_loader = DataLoader(
-        train_ds,
-        batch_size=args.batch_size,
+        train_ds, batch_size=args.batch_size,
         shuffle=not args.overfit,
-        collate_fn=collate_fn,
-        num_workers=4,
-        pin_memory=False,
-        persistent_workers=True,
+        collate_fn=collate,
+        num_workers=args.num_workers,
+        pin_memory=pin,
+        persistent_workers=(args.num_workers > 0),
     )
     val_loader = DataLoader(
-        val_ds,
-        batch_size=args.batch_size,
+        val_ds, batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collate_fn,
-        num_workers=2,
-        pin_memory=False,
-        persistent_workers=True,
+        collate_fn=collate,
+        num_workers=max(1, args.num_workers // 2),
+        pin_memory=pin,
+        persistent_workers=(args.num_workers > 0),
     )
 
     model = ModalFlowMatchingModule(
+        model_type=args.model,
         n_fft=args.n_fft,
         d_cond=args.d_cond,
         d_model=args.d_model,
         d_ff=args.d_ff,
         n_layers=args.n_layers,
+        d_state=args.d_state,
+        d_conv=args.d_conv,
+        expand=args.expand,
         lr=args.lr,
+        warmup_steps=args.warmup_steps,
         compile=args.compile,
     )
 
-    # ── callbacks ────────────────────────────────────────────────────────────
-    callbacks = [LearningRateMonitor(logging_interval='step')]
-    if not args.overfit:
-        callbacks.append(ModelCheckpoint(
-            monitor='val/mse',
-            mode='min',
-            save_top_k=3,
-            filename='epoch{epoch:03d}-val_mse{val/mse:.4f}',
-            auto_insert_metric_name=False,
-        ))
+    print(f"\nModel:      {args.model}")
+    print(f"Params:     {sum(p.numel() for p in model.parameters()):,}")
+    print(f"Encoder:    {sum(p.numel() for p in model.encoder.parameters()):,}")
+    print(f"VectorField:{sum(p.numel() for p in model.vector_field.parameters()):,}\n")
 
-    # ── logger ────────────────────────────────────────────────────────────────
+    # --- UNIFIED CALLBACKS & LOGGING ---
+    # 1. Start with the Learning Rate Monitor
+    callbacks = [LearningRateMonitor(logging_interval='step')]
+    
+    # 2. Add the Checkpoint Manager (Only if NOT overfitting)
+    if not args.overfit:
+        checkpoint_callback = ModelCheckpoint(
+            dirpath='checkpoints/',                       # Clean, obvious folder
+            filename=f'{args.model}-{{epoch:04d}}-{{val/mse:.4f}}', 
+            monitor='val/mse',                            
+            mode='min',                                   
+            save_top_k=3,                                 
+            save_last=True,                               
+            auto_insert_metric_name=False
+        )
+        callbacks.append(checkpoint_callback)
+
+    # 3. Setup W&B Logger
     logger = None
     if args.wandb and not args.overfit:
         logger = WandbLogger(project='dafx-taskb', name=args.run_name)
+    # -----------------------------------
 
-    # ── trainer ───────────────────────────────────────────────────────────────
     overfit_kwargs = dict(overfit_batches=1) if args.overfit else {}
 
     trainer = Trainer(
@@ -138,20 +161,20 @@ def main():
         accelerator='auto',
         devices=args.devices,
         callbacks=callbacks,
+        accumulate_grad_batches=16,
         logger=logger,
         gradient_clip_val=1.0,
         log_every_n_steps=1,
         val_check_interval=1.0,
-        check_val_every_n_epoch=50 if args.overfit else 1,
+        check_val_every_n_epoch=args.val_every,
+        num_sanity_val_steps=0,
         **overfit_kwargs,
     )
-
-    print(f"\nModel parameter count: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"Encoder parameters:    {sum(p.numel() for p in model.encoder.parameters()):,}")
-    print(f"VectorField parameters:{sum(p.numel() for p in model.vector_field.parameters()):,}")
 
     trainer.fit(model, train_loader, val_loader)
 
 
 if __name__ == '__main__':
+    # Fix the SLURM Dataloader deadlock
+    multiprocessing.set_start_method('spawn', force=True)
     main()
