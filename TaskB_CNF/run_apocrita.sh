@@ -59,10 +59,10 @@ python -c "from mamba_ssm import Mamba; import torch; m = Mamba(64).cuda(); x = 
 echo "========================="
 
 # 8. Start the Run
-echo "Starting mamba training..."
+echo "Starting deepsets training..."
 python train.py \
   --data_folder $DATA \
-  --model mamba \
+  --model deepsets \
   --batch_size 1 \
   --max_modes 0 \
   --max_epochs 500 \

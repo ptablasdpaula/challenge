@@ -138,12 +138,12 @@ def main():
     # 2. Add the Checkpoint Manager (Only if NOT overfitting)
     if not args.overfit:
         checkpoint_callback = ModelCheckpoint(
-            dirpath='checkpoints/',                       # Clean, obvious folder
-            filename=f'{args.model}-{{epoch:04d}}-{{val/mse:.4f}}', 
-            monitor='val/mse',                            
-            mode='min',                                   
-            save_top_k=3,                                 
-            save_last=True,                               
+            dirpath='checkpoints/',
+            filename=f'{args.model}-{{epoch:04d}}-{{val/RE:.4f}}',
+            monitor='val/RE',
+            mode='min',
+            save_top_k=3,
+            save_last=True,
             auto_insert_metric_name=False
         )
         callbacks.append(checkpoint_callback)
