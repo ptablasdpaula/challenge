@@ -33,8 +33,8 @@ from datetime import datetime
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Import required modules
-from ModalPlate.ModalPlate import ModalPlate
-from ModalPlate.ParamRange import params as plate_params
+from core.ModalPlate.ModalPlate import ModalPlate
+from core.ModalPlate.ParamRange import params as plate_params
 import soundfile as sf
 
 

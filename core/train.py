@@ -1,16 +1,10 @@
 """
 train.py  —  Task B modal CNF training entrypoint
 
-Local (MPS, DeepSets backend):
+Local/Apocrita Training (DeepSets backend):
   python train.py --data_folder ../random-IR-10000-4.0s \
-                  --model deepsets --overfit --n_samples 2 \
-                  --max_epochs 5000
-
-Apocrita (CUDA, Mamba backend):
-  python train.py --data_folder /data/random-IR-10000-4.0s \
-                  --model mamba --batch_size 4 \
-                  --d_model 512 --d_ff 1024 --n_layers 12 --d_cond 256 \
-                  --d_state 32 --max_epochs 500 --wandb
+                  --batch_size 4 --d_model 128 --d_ff 256 \
+                  --n_layers 6 --max_epochs 500
 """
 
 import multiprocessing
@@ -37,16 +31,10 @@ def parse_args():
     p.add_argument('--max_modes',    type=int,   default=0,
                    help='0 = dynamic padding per batch')
     # model
-    p.add_argument('--model',        type=str,   default='deepsets',
-                   choices=['deepsets', 'mamba'])
     p.add_argument('--d_model',      type=int,   default=128)
     p.add_argument('--d_ff',         type=int,   default=256)
     p.add_argument('--n_layers',     type=int,   default=6)
     p.add_argument('--d_cond',       type=int,   default=128)
-    p.add_argument('--d_state',      type=int,   default=16,
-                   help='Mamba SSM state size')
-    p.add_argument('--d_conv',       type=int,   default=4)
-    p.add_argument('--expand',       type=int,   default=2)
     # training
     p.add_argument('--batch_size',   type=int,   default=4)
     p.add_argument('--lr',           type=float, default=1e-4)
@@ -86,8 +74,7 @@ def main():
     args = parse_args()
 
     # MPS doesn't support pin_memory
-    is_mps = (torch.backends.mps.is_available()
-               and args.model == 'deepsets')
+    is_mps = torch.backends.mps.is_available()
     pin = not is_mps
 
     train_ds, val_ds = make_datasets(args)
@@ -112,21 +99,17 @@ def main():
     )
 
     model = ModalFlowMatchingModule(
-        model_type=args.model,
         n_fft=args.n_fft,
         d_cond=args.d_cond,
         d_model=args.d_model,
         d_ff=args.d_ff,
         n_layers=args.n_layers,
-        d_state=args.d_state,
-        d_conv=args.d_conv,
-        expand=args.expand,
         lr=args.lr,
         warmup_steps=args.warmup_steps,
         compile=args.compile,
     )
 
-    print(f"\nModel:      {args.model}")
+    print(f"\nModel:      deepsets")
     print(f"Params:     {sum(p.numel() for p in model.parameters()):,}")
     print(f"Encoder:    {sum(p.numel() for p in model.encoder.parameters()):,}")
     print(f"VectorField:{sum(p.numel() for p in model.vector_field.parameters()):,}\n")
@@ -134,12 +117,12 @@ def main():
     # --- UNIFIED CALLBACKS & LOGGING ---
     # 1. Start with the Learning Rate Monitor
     callbacks = [LearningRateMonitor(logging_interval='step')]
-    
+
     # 2. Add the Checkpoint Manager (Only if NOT overfitting)
     if not args.overfit:
         checkpoint_callback = ModelCheckpoint(
             dirpath='checkpoints/',
-            filename=f'{args.model}-{{epoch:04d}}-{{val/RE:.4f}}',
+            filename='deepsets-{epoch:04d}-{val/RE:.4f}',
             monitor='val/RE',
             mode='min',
             save_top_k=3,
