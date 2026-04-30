@@ -6,3 +6,4 @@ __pycache__/
 *.pyc
 random-IR-*/
 .venv/
+TaskB_CNF/checkpoints/
