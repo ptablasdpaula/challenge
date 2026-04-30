@@ -7,3 +7,5 @@ __pycache__/
 random-IR-*/
 .venv/
 TaskB_CNF/checkpoints/
+.idea
+resynthesised_IR*

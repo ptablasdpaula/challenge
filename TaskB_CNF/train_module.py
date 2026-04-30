@@ -12,8 +12,8 @@ from typing import Optional
 
 import numpy as np
 import torch
-from lightning import LightningModule
-from lightning.pytorch.utilities import grad_norm
+from pytorch_lightning import LightningModule
+from pytorch_lightning.utilities import grad_norm
 from scipy.optimize import linear_sum_assignment
 
 from model import LogMagFFTEncoder
