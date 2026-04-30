@@ -1,11 +1,7 @@
-# pixi environments
-.pixi/*
-!.pixi/config.toml
 .DS_Store
 __pycache__/
 *.pyc
 random-IR-*/
 .venv/
-TaskB_CNF/checkpoints/
 .idea
 resynthesised_IR*

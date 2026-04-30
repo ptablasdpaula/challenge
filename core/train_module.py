@@ -1,10 +1,9 @@
 """
 train_module.py
 ---------------
-Lightning module for Task B — works with both DeepSets and Mamba backends.
-
-Pass --model deepsets  to use model.py (runs on MPS, for local testing)
-Pass --model mamba     to use model_mamba.py (requires CUDA, for Apocrita)
+Lightning module for Task B — DeepSets backend.
+(Mamba parameters are kept in __init__ solely for backward
+compatibility with older checkpoints).
 """
 
 from functools import partial
@@ -83,16 +82,16 @@ def _compute_RE(f0_gt, sigma_gt, gain_gt, f0_pr, sigma_pr, gain_pr):
 class ModalFlowMatchingModule(LightningModule):
     def __init__(
         self,
-        model_type:             str   = 'deepsets',
+        model_type:             str   = 'deepsets', # Kept for checkpoint compatibility
         n_fft:                  int   = 8192,
         d_cond:                 int   = 128,
         encoder_base_channels:  int   = 24,
         d_model:                int   = 128,
         d_ff:                   int   = 256,
         n_layers:               int   = 6,
-        d_state:                int   = 16,
-        d_conv:                 int   = 4,
-        expand:                 int   = 2,
+        d_state:                int   = 16,         # Kept for checkpoint compatibility
+        d_conv:                 int   = 4,          # Kept for checkpoint compatibility
+        expand:                 int   = 2,          # Kept for checkpoint compatibility
         lr:                     float = 1e-4,
         warmup_steps:           int   = 2000,
         cfg_dropout_rate:       float = 0.1,
@@ -111,25 +110,13 @@ class ModalFlowMatchingModule(LightningModule):
             base_channels=encoder_base_channels,
         )
 
-        if model_type == 'mamba':
-            from model_mamba import BidirectionalMambaVectorField
-            self.vector_field = BidirectionalMambaVectorField(
-                d_model=d_model,
-                d_cond=d_cond,
-                d_ff=d_ff,
-                n_layers=n_layers,
-                d_state=d_state,
-                d_conv=d_conv,
-                expand=expand,
-            )
-        else:
-            from model import DeepSetsVectorField
-            self.vector_field = DeepSetsVectorField(
-                d_model=d_model,
-                d_cond=d_cond,
-                d_ff=d_ff,
-                n_layers=n_layers,
-            )
+        from model import DeepSetsVectorField
+        self.vector_field = DeepSetsVectorField(
+            d_model=d_model,
+            d_cond=d_cond,
+            d_ff=d_ff,
+            n_layers=n_layers,
+        )
 
     def _encode(self, batch):
         return self.encoder(batch['log_mag_fft'])
